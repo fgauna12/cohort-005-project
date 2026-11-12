@@ -6,6 +6,13 @@ import { getCurrentUserId } from "~/lib/session";
 import { getAccess, requireContentAccess } from "~/lib/access.server";
 import { renderComment } from "~/lib/comment-markdown.server";
 import {
+  getBookmark,
+  getNote,
+  saveNote,
+  saveNoteSchema,
+  toggleBookmark,
+} from "~/lib/saved.server";
+import {
   createComment,
   deleteComment,
   editComment,
@@ -36,6 +43,7 @@ import {
 import { and, asc, desc, eq, or, sql } from "drizzle-orm";
 import { Button } from "~/components/ui/button";
 import { Card, CardContent } from "~/components/ui/card";
+import { Textarea } from "~/components/ui/textarea";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -44,8 +52,11 @@ import {
   ChevronRight,
   Circle,
   Clock,
+  Bookmark,
+  BookmarkCheck,
   Github,
   HelpCircle,
+  NotebookPen,
   MapPin,
   PlayCircle,
   ShieldAlert,
@@ -53,7 +64,7 @@ import {
   Trophy,
   RotateCcw,
 } from "lucide-react";
-import { cn, formatDuration } from "~/lib/utils";
+import { cn, formatDuration, formatRelativeTime } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
 import { YouTubePlayer } from "~/components/youtube-player";
 import { data, isRouteErrorResponse } from "react-router";
@@ -689,6 +700,15 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     ? await renderThread(getLessonThread(lessonId))
     : [];
 
+  const bookmarked =
+    currentUserId && canViewContent
+      ? !!getBookmark(db, currentUserId, lessonId)
+      : false;
+  const note =
+    currentUserId && canViewContent
+      ? getNote(db, currentUserId, lessonId)
+      : undefined;
+
   // Render lesson content from Markdown to HTML server-side
   const contentHtml = lesson.content
     ? await renderMarkdown(lesson.content)
@@ -783,6 +803,10 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     canViewContent,
     canModerate: access.isStaff,
     instructorName: instructor?.name ?? "your instructor",
+    bookmarked,
+    note: note
+      ? { body: note.body, updatedAt: note.updatedAt }
+      : null,
   };
 }
 
@@ -880,6 +904,36 @@ export async function action({ params, request }: Route.ActionArgs) {
     }
   }
 
+  if (intent === "toggle-bookmark" || intent === "save-note") {
+    await requireContentAccess(request, course.id);
+    const lesson = getLessonById(lessonId);
+    const mod = lesson ? getModuleById(lesson.moduleId) : undefined;
+    if (!lesson || mod?.courseId !== course.id) {
+      throw data("Lesson not found in this course", { status: 404 });
+    }
+
+    if (intent === "toggle-bookmark") {
+      return { ok: true, bookmarked: toggleBookmark(db, currentUserId, lessonId) };
+    }
+
+    const parsed = parseFormData(formData, saveNoteSchema);
+    if (!parsed.success) {
+      throw data(parsed.errors.body ?? "Invalid note.", { status: 400 });
+    }
+
+    const result = saveNote(
+      db,
+      currentUserId,
+      lessonId,
+      parsed.data.body,
+      new Date()
+    );
+    if (!result.ok) {
+      throw data(result.error ?? "Invalid note.", { status: 400 });
+    }
+    return { ok: true, noteSaved: true };
+  }
+
   if (intent === "mark-complete") {
     markLessonComplete(currentUserId, lessonId);
     return { success: true };
@@ -966,6 +1020,8 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
     canViewContent,
     canModerate,
     instructorName,
+    bookmarked,
+    note,
   } = loaderData;
   const [autoplay, toggleAutoplay] = useAutoplay();
   const fetcher = useFetcher({ key: `mark-complete-${lesson.id}` });
@@ -1074,6 +1130,9 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
                 {formatDuration(lesson.durationMinutes, true, false, false)}
               </div>
             )}
+            {canViewContent && currentUserId && (
+              <BookmarkToggle bookmarked={bookmarked} />
+            )}
             {lesson.githubRepoUrl && (
               <a
                 href={lesson.githubRepoUrl}
@@ -1117,6 +1176,11 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
                 No content has been added to this lesson yet.
               </CardContent>
             </Card>
+          )}
+
+          {/* Notes */}
+          {canViewContent && currentUserId && (
+            <LessonNote key={`${lesson.id}-${currentUserId}`} note={note} />
           )}
 
           {/* Quiz Section */}
@@ -1237,6 +1301,69 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
         </div>
       </div>
     </div>
+  );
+}
+
+function BookmarkToggle({ bookmarked }: { bookmarked: boolean }) {
+  const fetcher = useFetcher<{ ok: boolean }>();
+  const isSaving = fetcher.state !== "idle";
+
+  return (
+    <fetcher.Form method="post">
+      <input type="hidden" name="intent" value="toggle-bookmark" />
+      <Button type="submit" variant="outline" size="sm" disabled={isSaving}>
+        {bookmarked ? (
+          <BookmarkCheck className="mr-1.5 size-4" />
+        ) : (
+          <Bookmark className="mr-1.5 size-4" />
+        )}
+        {bookmarked ? "Bookmarked" : "Bookmark"}
+      </Button>
+    </fetcher.Form>
+  );
+}
+
+function LessonNote({
+  note,
+}: {
+  note: { body: string; updatedAt: string } | null;
+}) {
+  const fetcher = useFetcher<{ ok: boolean }>();
+  const isSaving = fetcher.state !== "idle";
+
+  return (
+    <Card className="mb-8">
+      <CardContent className="space-y-3 pt-6">
+        <div className="flex items-center gap-2">
+          <NotebookPen className="size-4 text-muted-foreground" />
+          <h2 className="font-semibold">Your notes</h2>
+        </div>
+
+        <fetcher.Form method="post" className="space-y-3">
+          <input type="hidden" name="intent" value="save-note" />
+          <Textarea
+            name="body"
+            rows={6}
+            defaultValue={note?.body ?? ""}
+            placeholder="Only you can read this."
+            className="resize-y"
+          />
+          <div className="flex items-center gap-3">
+            <Button type="submit" size="sm" disabled={isSaving}>
+              {isSaving ? "Saving..." : "Save note"}
+            </Button>
+            {note && (
+              <span
+                suppressHydrationWarning
+                className="text-xs text-muted-foreground"
+              >
+                Last edited {formatRelativeTime(note.updatedAt)}
+              </span>
+            )}
+          </div>
+        </fetcher.Form>
+      </CardContent>
+    </Card>
   );
 }
 

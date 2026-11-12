@@ -5,7 +5,12 @@ import { UserRole } from "~/db/schema";
 import { isLapsed } from "~/lib/enrollments";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
-import { AlertTriangle, ArrowLeft, Users, Award } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Users,
+  Award,
+} from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { db } from "~/db";
 import {
